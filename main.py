@@ -7,7 +7,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-APP_ID = 1089
+APP_ID = 34S0dpfCnDpl2MirCfCM5
 TOKEN = os.environ.get("DERIV_API_TOKEN", "")
 REST_BASE = "https://api.derivws.com"
 WS_PUBLIC = "wss://api.derivws.com/trading/v1/options/ws/public"
