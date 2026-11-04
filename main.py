@@ -1,96 +1,101 @@
 import os
 import asyncio
-import socket
+import json
+import websockets
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from deriv_api import DerivAPI
-
-# --- IPv4 PATCH ---
-# This forces the server to use IPv4. Cloud servers (like Render) sometimes
-# try to connect via IPv6 which causes the connection to Deriv to silently hang.
-orig_getaddrinfo = socket.getaddrinfo
-def getaddrinfo_ipv4(host, port, family=0, type=0, proto=0, flags=0):
-    return orig_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
-socket.getaddrinfo = getaddrinfo_ipv4
-# ------------------
 
 APP_ID = 1089
 TOKEN = os.environ.get("DERIV_API_TOKEN", "")
+# The endpoint we confirmed is correct
 ENDPOINT = f"wss://ws.derivws.com/websockets/v3?app_id={APP_ID}"
 
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 bot_state = {"running": False}
-api = None
-authorized = False
 
-async def get_api():
-    global api, authorized
-    if api is None or not authorized:
-        try:
-            if api is None:
-                print(f"Attempting to connect to: {ENDPOINT}")
-                api = DerivAPI(endpoint=ENDPOINT, app_id=APP_ID)
+async def send_deriv_request(payload: dict, timeout: float = 10.0):
+    """Opens a connection, sends a request, and waits for the response."""
+    try:
+        print(f"Connecting to Deriv: {ENDPOINT}")
+        async with websockets.connect(ENDPOINT, open_timeout=timeout) as ws:
+            print("WebSocket connected. Sending payload...")
+            await ws.send(json.dumps(payload))
             
-            if TOKEN:
-                print("Attempting to authorize with token...")
-                auth = await asyncio.wait_for(api.authorize(TOKEN), timeout=15.0)
-                print(f"Auth response: {auth}")
-                
-                if "error" in auth:
-                    authorized = False
-                    error_msg = auth['error'].get('message', 'Unknown error')
-                    print(f"Deriv Auth Error: {error_msg}")
-                    raise HTTPException(401, f"Deriv Auth Error: {error_msg}")
-                else:
-                    authorized = True
-                    print("Successfully authorized with Deriv.")
-        except asyncio.TimeoutError:
-            api = None
-            authorized = False
-            print("CRITICAL: Timeout connecting or authorizing with Deriv.")
-            raise HTTPException(504, "Timeout connecting to Deriv. The server may be blocked.")
-        except Exception as e:
-            api = None
-            authorized = False
-            print(f"CRITICAL: Connection error: {str(e)}")
-            raise HTTPException(500, f"Connection error: {str(e)}")
-    return api
+            print("Waiting for response...")
+            response_raw = await asyncio.wait_for(ws.recv(), timeout=timeout)
+            response = json.loads(response_raw)
+            print(f"Received response: {response}")
+            return response
+            
+    except asyncio.TimeoutError:
+        print(f"Timeout occurred after {timeout} seconds.")
+        raise HTTPException(504, "Timeout connecting to Deriv. Please try again.")
+    except websockets.exceptions.WebSocketException as e:
+        print(f"WebSocket error: {e}")
+        raise HTTPException(500, f"WebSocket error: {str(e)}")
+    except Exception as e:
+        print(f"Unexpected error: {e}")
+        raise HTTPException(500, f"Unexpected error: {str(e)}")
 
 @app.get("/api/health")
 def health():
-    return {"ok": True, "bot": bot_state, "token_configured": bool(TOKEN), "authorized": authorized}
+    return {"ok": True, "bot": bot_state, "token_configured": bool(TOKEN)}
 
 @app.get("/api/account")
 async def account():
-    client = await get_api()
-    try:
-        bal = await asyncio.wait_for(client.balance(), timeout=10.0)
-        return {
-            "balance": bal.get("balance", {}).get("balance"),
-            "currency": bal.get("balance", {}).get("currency"),
-            "loginid": bal.get("balance", {}).get("loginid"),
-        }
-    except Exception as e:
-        print(f"Error fetching balance: {str(e)}")
-        raise HTTPException(500, f"Error fetching balance: {str(e)}")
+    if not TOKEN:
+        raise HTTPException(401, "DERIV_API_TOKEN environment variable is not set.")
+    
+    # Manually authorize to get an active connection
+    auth_payload = {"authorize": TOKEN}
+    auth_response = await send_deriv_request(auth_payload)
+    
+    if "error" in auth_response:
+        error_msg = auth_response["error"].get("message", "Unknown auth error")
+        raise HTTPException(401, f"Deriv Auth Error: {error_msg}")
+    
+    # If authorized, get the balance
+    balance_payload = {"balance": 1}
+    bal_response = await send_deriv_request(balance_payload)
+    
+    if "error" in bal_response:
+        error_msg = bal_response["error"].get("message", "Unknown balance error")
+        raise HTTPException(500, f"Error fetching balance: {error_msg}")
+        
+    return {
+        "balance": bal_response.get("balance", {}).get("balance"),
+        "currency": bal_response.get("balance", {}).get("currency"),
+        "loginid": bal_response.get("balance", {}).get("loginid"),
+    }
 
 @app.get("/api/ticks")
 async def ticks(symbol: str = "R_100"):
-    client = await get_api()
-    try:
-        resp = await asyncio.wait_for(
-            client.ticks_history({"ticks_history": symbol, "count": 1, "end": "latest"}), 
-            timeout=10.0
-        )
-        if "error" in resp:
-            raise HTTPException(400, resp["error"]["message"])
-        return {"symbol": symbol, "quote": resp["history"]["prices"][-1], "time": resp["history"]["times"][-1]}
-    except Exception as e:
-        print(f"Error fetching tick: {str(e)}")
-        raise HTTPException(500, f"Error fetching tick: {str(e)}")
+    tick_payload = {
+        "ticks_history": symbol,
+        "count": 1,
+        "end": "latest"
+    }
+    tick_response = await send_deriv_request(tick_payload)
+    
+    if "error" in tick_response:
+        error_msg = tick_response["error"].get("message", "Unknown tick error")
+        raise HTTPException(400, error_msg)
+        
+    history = tick_response.get("history", {})
+    prices = history.get("prices", [])
+    times = history.get("times", [])
+    
+    if not prices:
+        raise HTTPException(500, "No price data received from Deriv.")
+        
+    return {
+        "symbol": symbol,
+        "quote": prices[-1],
+        "time": times[-1]
+    }
 
 class Toggle(BaseModel):
     symbol: str = "R_100"
