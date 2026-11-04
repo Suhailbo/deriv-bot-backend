@@ -13,34 +13,43 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 
 bot_state = {"running": False}
 api = None
+authorized = False # New flag to track if login was successful
 
 async def get_api():
-    global api
-    if api is None:
+    global api, authorized
+    if api is None or not authorized:
         try:
-            api = DerivAPI(app_id=APP_ID)
+            if api is None:
+                api = DerivAPI(app_id=APP_ID)
+            
             if TOKEN:
-                # Added timeout so it doesn't hang forever
                 auth = await asyncio.wait_for(api.authorize(TOKEN), timeout=10.0)
+                # Check if authorize returned an error
                 if "error" in auth:
-                    api = None
-                    raise HTTPException(401, auth["error"]["message"])
+                    authorized = False
+                    # Raise a detailed error from Deriv
+                    raise HTTPException(401, f"Deriv Auth Error: {auth['error'].get('message', 'Unknown')}")
+                else:
+                    authorized = True
         except asyncio.TimeoutError:
             api = None
+            authorized = False
             raise HTTPException(504, "Timeout connecting to Deriv. Try again.")
         except Exception as e:
             api = None
+            authorized = False
             raise HTTPException(500, f"Connection error: {str(e)}")
     return api
 
 @app.get("/api/health")
 def health():
-    return {"ok": True, "bot": bot_state, "token_configured": bool(TOKEN)}
+    return {"ok": True, "bot": bot_state, "token_configured": bool(TOKEN), "authorized": authorized}
 
 @app.get("/api/account")
 async def account():
     client = await get_api()
     try:
+        # Add a timeout to the balance fetch itself
         bal = await asyncio.wait_for(client.balance(), timeout=10.0)
         return {
             "balance": bal.get("balance", {}).get("balance"),
