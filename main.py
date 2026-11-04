@@ -1,16 +1,15 @@
 import os
-import asyncio
-import json
 import httpx
-import websockets
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-APP_ID = 34S0dpfCnDpl2MirCfCM5
+# This is your Personal App ID.
+# If you have already replaced 1089 with your own, keep it. 
+# If not, you MUST get one from developers.deriv.com and put it here.
+APP_ID = "34S0dpfCnDpl2MirCfCM5"
 TOKEN = os.environ.get("DERIV_API_TOKEN", "")
 REST_BASE = "https://api.derivws.com"
-WS_PUBLIC = "wss://api.derivws.com/trading/v1/options/ws/public"
 
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -28,7 +27,7 @@ async def account():
     
     headers = {
         "Authorization": f"Bearer {TOKEN}",
-        "Deriv-App-ID": str(APP_ID)  # Required for PAT authentication
+        "Deriv-App-ID": APP_ID
     }
     
     try:
@@ -46,7 +45,6 @@ async def account():
             if not accounts:
                 raise HTTPException(404, "No accounts found for this token.")
             
-            # Find the demo account
             demo_account = next((acc for acc in accounts if acc.get("type") == "demo"), None)
             if not demo_account:
                 raise HTTPException(404, "No demo account found. Please ensure your token has access to a demo account.")
@@ -66,33 +64,9 @@ async def account():
 
 @app.get("/api/ticks")
 async def ticks(symbol: str = "R_100"):
-    payload = {"ticks": symbol, "subscribe": 1}
-    
-    try:
-        print(f"Connecting to public WS for {symbol}...")
-        # Public endpoint requires NO authentication headers
-        async with websockets.connect(WS_PUBLIC, open_timeout=15.0) as ws:
-            await ws.send(json.dumps(payload))
-            
-            # Wait for the first tick response
-            response_raw = await asyncio.wait_for(ws.recv(), timeout=10.0)
-            response = json.loads(response_raw)
-            
-            if "error" in response:
-                raise HTTPException(400, response["error"].get("message", "Unknown tick error"))
-            
-            tick = response.get("tick", {})
-            return {
-                "symbol": tick.get("symbol"),
-                "quote": tick.get("quote"),
-                "epoch": tick.get("epoch")
-            }
-            
-    except asyncio.TimeoutError:
-        raise HTTPException(504, "Timeout waiting for tick data.")
-    except Exception as e:
-        print(f"WS Error: {str(e)}")
-        raise HTTPException(500, f"WebSocket error: {str(e)}")
+    # This endpoint is currently a placeholder and will be replaced in the next step.
+    # It will eventually use a WebSocket connection for live data.
+    return {"symbol": symbol, "quote": "123.45", "message": "Placeholder - live WS connection coming next"}
 
 class Toggle(BaseModel):
     symbol: str = "R_100"
