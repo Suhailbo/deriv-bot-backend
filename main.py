@@ -7,37 +7,47 @@ from deriv_api import DerivAPI
 
 APP_ID = 1089
 TOKEN = os.environ.get("DERIV_API_TOKEN", "")
+# Explicitly set the current WebSocket endpoint
+ENDPOINT = f"wss://ws.derivws.com/websockets/v3?app_id={APP_ID}"
 
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 bot_state = {"running": False}
 api = None
-authorized = False # New flag to track if login was successful
+authorized = False
 
 async def get_api():
     global api, authorized
     if api is None or not authorized:
         try:
             if api is None:
-                api = DerivAPI(app_id=APP_ID)
+                # Pass the explicit endpoint here
+                print(f"Attempting to connect to: {ENDPOINT}")
+                api = DerivAPI(endpoint=ENDPOINT, app_id=APP_ID)
             
             if TOKEN:
-                auth = await asyncio.wait_for(api.authorize(TOKEN), timeout=10.0)
-                # Check if authorize returned an error
+                print("Attempting to authorize with token...")
+                auth = await asyncio.wait_for(api.authorize(TOKEN), timeout=15.0)
+                print(f"Auth response: {auth}") # Log the full auth response
+                
                 if "error" in auth:
                     authorized = False
-                    # Raise a detailed error from Deriv
-                    raise HTTPException(401, f"Deriv Auth Error: {auth['error'].get('message', 'Unknown')}")
+                    error_msg = auth['error'].get('message', 'Unknown error')
+                    print(f"Deriv Auth Error: {error_msg}")
+                    raise HTTPException(401, f"Deriv Auth Error: {error_msg}")
                 else:
                     authorized = True
+                    print("Successfully authorized with Deriv.")
         except asyncio.TimeoutError:
             api = None
             authorized = False
-            raise HTTPException(504, "Timeout connecting to Deriv. Try again.")
+            print("CRITICAL: Timeout connecting or authorizing with Deriv.")
+            raise HTTPException(504, "Timeout connecting to Deriv. The server may be blocked from accessing the endpoint.")
         except Exception as e:
             api = None
             authorized = False
+            print(f"CRITICAL: Connection error: {str(e)}")
             raise HTTPException(500, f"Connection error: {str(e)}")
     return api
 
@@ -49,7 +59,6 @@ def health():
 async def account():
     client = await get_api()
     try:
-        # Add a timeout to the balance fetch itself
         bal = await asyncio.wait_for(client.balance(), timeout=10.0)
         return {
             "balance": bal.get("balance", {}).get("balance"),
@@ -57,6 +66,7 @@ async def account():
             "loginid": bal.get("balance", {}).get("loginid"),
         }
     except Exception as e:
+        print(f"Error fetching balance: {str(e)}")
         raise HTTPException(500, f"Error fetching balance: {str(e)}")
 
 @app.get("/api/ticks")
@@ -71,6 +81,7 @@ async def ticks(symbol: str = "R_100"):
             raise HTTPException(400, resp["error"]["message"])
         return {"symbol": symbol, "quote": resp["history"]["prices"][-1], "time": resp["history"]["times"][-1]}
     except Exception as e:
+        print(f"Error fetching tick: {str(e)}")
         raise HTTPException(500, f"Error fetching tick: {str(e)}")
 
 class Toggle(BaseModel):
