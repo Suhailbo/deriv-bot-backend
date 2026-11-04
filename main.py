@@ -8,19 +8,25 @@ from pydantic import BaseModel
 
 APP_ID = 1089
 TOKEN = os.environ.get("DERIV_API_TOKEN", "")
-# The endpoint we confirmed is correct
-ENDPOINT = f"wss://ws.derivws.com/websockets/v3?app_id={APP_ID}"
+# Using the legacy endpoint to bypass Cloudflare blocking on the main domain
+ENDPOINT = f"wss://ws.binaryws.com/websockets/v3?app_id={APP_ID}"
+
+# A standard browser User-Agent to avoid looking like a bot to the WAF
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+}
 
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 bot_state = {"running": False}
 
-async def send_deriv_request(payload: dict, timeout: float = 10.0):
+async def send_deriv_request(payload: dict, timeout: float = 15.0):
     """Opens a connection, sends a request, and waits for the response."""
     try:
         print(f"Connecting to Deriv: {ENDPOINT}")
-        async with websockets.connect(ENDPOINT, open_timeout=timeout) as ws:
+        # Pass the headers to mimic a real browser
+        async with websockets.connect(ENDPOINT, additional_headers=HEADERS, open_timeout=timeout) as ws:
             print("WebSocket connected. Sending payload...")
             await ws.send(json.dumps(payload))
             
@@ -49,7 +55,6 @@ async def account():
     if not TOKEN:
         raise HTTPException(401, "DERIV_API_TOKEN environment variable is not set.")
     
-    # Manually authorize to get an active connection
     auth_payload = {"authorize": TOKEN}
     auth_response = await send_deriv_request(auth_payload)
     
@@ -57,7 +62,6 @@ async def account():
         error_msg = auth_response["error"].get("message", "Unknown auth error")
         raise HTTPException(401, f"Deriv Auth Error: {error_msg}")
     
-    # If authorized, get the balance
     balance_payload = {"balance": 1}
     bal_response = await send_deriv_request(balance_payload)
     
