@@ -1,13 +1,22 @@
 import os
 import asyncio
+import socket
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from deriv_api import DerivAPI
 
+# --- IPv4 PATCH ---
+# This forces the server to use IPv4. Cloud servers (like Render) sometimes
+# try to connect via IPv6 which causes the connection to Deriv to silently hang.
+orig_getaddrinfo = socket.getaddrinfo
+def getaddrinfo_ipv4(host, port, family=0, type=0, proto=0, flags=0):
+    return orig_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
+socket.getaddrinfo = getaddrinfo_ipv4
+# ------------------
+
 APP_ID = 1089
 TOKEN = os.environ.get("DERIV_API_TOKEN", "")
-# Explicitly set the current WebSocket endpoint
 ENDPOINT = f"wss://ws.derivws.com/websockets/v3?app_id={APP_ID}"
 
 app = FastAPI()
@@ -22,14 +31,13 @@ async def get_api():
     if api is None or not authorized:
         try:
             if api is None:
-                # Pass the explicit endpoint here
                 print(f"Attempting to connect to: {ENDPOINT}")
                 api = DerivAPI(endpoint=ENDPOINT, app_id=APP_ID)
             
             if TOKEN:
                 print("Attempting to authorize with token...")
                 auth = await asyncio.wait_for(api.authorize(TOKEN), timeout=15.0)
-                print(f"Auth response: {auth}") # Log the full auth response
+                print(f"Auth response: {auth}")
                 
                 if "error" in auth:
                     authorized = False
@@ -43,7 +51,7 @@ async def get_api():
             api = None
             authorized = False
             print("CRITICAL: Timeout connecting or authorizing with Deriv.")
-            raise HTTPException(504, "Timeout connecting to Deriv. The server may be blocked from accessing the endpoint.")
+            raise HTTPException(504, "Timeout connecting to Deriv. The server may be blocked.")
         except Exception as e:
             api = None
             authorized = False
