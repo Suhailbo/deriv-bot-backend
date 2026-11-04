@@ -4,10 +4,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-# This is your Personal App ID.
-# If you have already replaced 1089 with your own, keep it. 
-# If not, you MUST get one from developers.deriv.com and put it here.
-APP_ID = "34S0dpfCnDpl2MirCfCM5"
+# IMPORTANT: Make sure to change "1089" to your actual App ID from developers.deriv.com
+APP_ID = "34S0dpfCnDpl2MirCfCM5" 
 TOKEN = os.environ.get("DERIV_API_TOKEN", "")
 REST_BASE = "https://api.derivws.com"
 
@@ -42,18 +40,26 @@ async def account():
             data = response.json()
             accounts = data.get("data", [])
             
-            if not accounts:
-                raise HTTPException(404, "No accounts found for this token.")
+            # This will print the exact response from Deriv into your Render Logs
+            print(f"DEBUG - Accounts received from Deriv: {accounts}")
             
-            demo_account = next((acc for acc in accounts if acc.get("type") == "demo"), None)
+            if not accounts:
+                raise HTTPException(404, "No accounts found. Your token may lack the 'Read' scope.")
+            
+            # Look for demo account in the returned list
+            demo_account = next(
+                (acc for acc in accounts if acc.get("account_type") == "demo" or acc.get("type") == "demo"), 
+                None
+            )
+            
             if not demo_account:
-                raise HTTPException(404, "No demo account found. Please ensure your token has access to a demo account.")
+                raise HTTPException(404, "No demo account found in the list. Check Render logs to see what Deriv returned.")
             
             return {
                 "balance": demo_account.get("balance"),
                 "currency": demo_account.get("currency"),
                 "loginid": demo_account.get("account_id"),
-                "type": demo_account.get("type")
+                "type": demo_account.get("account_type", demo_account.get("type"))
             }
             
     except httpx.TimeoutException:
@@ -64,9 +70,8 @@ async def account():
 
 @app.get("/api/ticks")
 async def ticks(symbol: str = "R_100"):
-    # This endpoint is currently a placeholder and will be replaced in the next step.
-    # It will eventually use a WebSocket connection for live data.
-    return {"symbol": symbol, "quote": "123.45", "message": "Placeholder - live WS connection coming next"}
+    # Placeholder until we get the account working
+    return {"symbol": symbol, "quote": "123.45", "message": "Placeholder"}
 
 class Toggle(BaseModel):
     symbol: str = "R_100"
