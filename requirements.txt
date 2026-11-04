@@ -1,0 +1,5 @@
+deriv_api
+fastapi
+uvicorn[standard]
+websockets
+pydantic
