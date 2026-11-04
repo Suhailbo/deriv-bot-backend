@@ -1,4 +1,3 @@
-python_deriv_api
 fastapi
 uvicorn[standard]
 websockets
