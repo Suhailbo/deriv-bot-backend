@@ -3,21 +3,32 @@ import json
 import httpx
 import asyncio
 import websockets
+import datetime
+import pandas as pd
+import pandas_ta as ta
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-# Your App ID
 APP_ID = "34S0dpfCnDpl2MirCfCM5" 
 TOKEN = os.environ.get("DERIV_API_TOKEN", "")
 REST_BASE = "https://api.derivws.com"
-# The exact public WS endpoint Deriv support told us to use
 WS_PUBLIC = "wss://api.derivws.com/trading/v1/options/ws/public"
+WS_TRADING = f"wss://ws.derivws.com/websockets/v3?app_id={APP_ID}"
+
+# --- TRADE SETTINGS ---
+STAKE_AMOUNT = 1.00      # How much USD to risk per trade
+STOP_LOSS_AMT = 0.50     # Close if trade drops by $0.50 (50% loss)
+TAKE_PROFIT_AMT = 1.00   # Close if trade gains $1.00 (100% profit)
+DURATION = 5             # Trade length in minutes
+# ----------------------
 
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-bot_state = {"running": False}
+bot_state = {"running": False, "symbol": "frxXAUUSD"} 
+trade_history = []
+bot_task = None
 
 @app.get("/api/health")
 def health():
@@ -26,75 +37,143 @@ def health():
 @app.get("/api/account")
 async def account():
     if not TOKEN:
-        raise HTTPException(401, "DERIV_API_TOKEN environment variable is not set.")
-    
-    headers = {
-        "Authorization": f"Bearer {TOKEN}",
-        "Deriv-App-ID": APP_ID
-    }
-    
+        raise HTTPException(401, "TOKEN not set.")
+    headers = {"Authorization": f"Bearer {TOKEN}", "Deriv-App-ID": APP_ID}
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
             response = await client.get(f"{REST_BASE}/trading/v1/options/accounts", headers=headers)
-            if response.status_code != 200:
-                raise HTTPException(response.status_code, f"Deriv API Error: {response.text}")
-            
             accounts = response.json().get("data", [])
-            demo_account = next((acc for acc in accounts if acc.get("account_type") == "demo" or acc.get("type") == "demo"), None)
-            
-            if not demo_account:
-                raise HTTPException(404, "No demo account found.")
-            
-            return {
-                "balance": demo_account.get("balance"),
-                "currency": demo_account.get("currency"),
-                "loginid": demo_account.get("account_id"),
-                "type": demo_account.get("account_type", demo_account.get("type"))
-            }
-            
-    except httpx.TimeoutException:
-        raise HTTPException(504, "Timeout connecting to Deriv REST API.")
+            demo = next((acc for acc in accounts if acc.get("account_type") == "demo" or acc.get("type") == "demo"), None)
+            if not demo: raise HTTPException(404, "No demo found.")
+            return {"balance": demo.get("balance"), "currency": demo.get("currency"), "loginid": demo.get("account_id"), "type": "demo"}
     except Exception as e:
         raise HTTPException(500, f"Error: {str(e)}")
 
 @app.get("/api/ticks")
-async def ticks(symbol: str = "R_100"):
+async def ticks(symbol: str = "frxXAUUSD"):
     payload = {"ticks": symbol, "subscribe": 1}
-    
     try:
-        # Connect to the public WebSocket for live market data
         async with websockets.connect(WS_PUBLIC, open_timeout=10.0) as ws:
             await ws.send(json.dumps(payload))
-            
-            # Wait for the first tick to arrive
-            response_raw = await asyncio.wait_for(ws.recv(), timeout=10.0)
-            response = json.loads(response_raw)
-            
-            if "error" in response:
-                raise HTTPException(400, response["error"].get("message", "Unknown error"))
-            
-            tick = response.get("tick", {})
-            return {
-                "symbol": tick.get("symbol"),
-                "quote": tick.get("quote"),
-                "epoch": tick.get("epoch")
-            }
-            
-    except asyncio.TimeoutError:
-        raise HTTPException(504, "Timeout waiting for live tick.")
+            response = json.loads(await asyncio.wait_for(ws.recv(), timeout=10.0))
+            return {"symbol": symbol, "quote": response.get("tick", {}).get("quote")}
     except Exception as e:
         raise HTTPException(500, f"WebSocket error: {str(e)}")
 
+@app.get("/api/trades")
+def get_trades():
+    return trade_history
+
+async def run_strategy():
+    symbol = bot_state["symbol"]
+    print(f"Strategy started for {symbol}...")
+    
+    try:
+        async with websockets.connect(WS_TRADING) as ws:
+            await ws.send(json.dumps({"authorize": TOKEN}))
+            await ws.recv() 
+            
+            while bot_state["running"]:
+                # Fetch 50 candles to calculate indicators
+                candle_req = {"ticks_history": symbol, "adjust_start_time": 1, "count": 50, "end": "latest", "start": 1, "style": "candles", "granularity": 60}
+                await ws.send(json.dumps(candle_req))
+                resp = json.loads(await ws.recv())
+                
+                if "candles" in resp:
+                    df = pd.DataFrame(resp["candles"])
+                    df['close'] = df['close'].astype(float)
+                    df['high'] = df['high'].astype(float)
+                    df['low'] = df['low'].astype(float)
+                    df['open'] = df['open'].astype(float)
+
+                    df['EMA_9'] = ta.ema(df['close'], length=9)
+                    df['EMA_21'] = ta.ema(df['close'], length=21)
+                    df['RSI'] = ta.rsi(df['close'], length=14)
+                    
+                    current = df.iloc[-1]
+                    prev = df.iloc[-2]
+                    current_price = current['close']
+
+                    long_signal = (prev['EMA_9'] <= prev['EMA_21']) and (current['EMA_9'] > current['EMA_21']) and (current['RSI'] > 50)
+                    short_signal = (prev['EMA_9'] >= prev['EMA_21']) and (current['EMA_9'] < current['EMA_21']) and (current['RSI'] < 50)
+
+                    if long_signal:
+                        print(f"LONG Signal on {symbol} at {current_price}")
+                        await place_trade(ws, "CALL", symbol, current_price)
+                        await asyncio.sleep(60) 
+                    elif short_signal:
+                        print(f"SHORT Signal on {symbol} at {current_price}")
+                        await place_trade(ws, "PUT", symbol, current_price)
+                        await asyncio.sleep(60)
+                
+                await asyncio.sleep(10) 
+                
+    except Exception as e:
+        print(f"Strategy Error: {e}")
+        bot_state["running"] = False
+
+async def place_trade(ws, contract_type, symbol, entry_price):
+    # Step 1: Request a Proposal (Deriv requires this to set SL/TP)
+    proposal_req = {
+        "proposal": 1,
+        "amount": STAKE_AMOUNT,
+        "basis": "stake",
+        "contract_type": contract_type,
+        "currency": "USD",
+        "duration": DURATION,
+        "duration_unit": "m",
+        "symbol": symbol
+    }
+    await ws.send(json.dumps(proposal_req))
+    prop_resp = json.loads(await ws.recv())
+    
+    if "error" in prop_resp:
+        print(f"Proposal Error: {prop_resp['error']['message']}")
+        return
+
+    proposal_id = prop_resp["proposal"]["id"]
+
+    # Step 2: Buy the contract with Stop Loss and Take Profit
+    buy_req = {
+        "buy": proposal_id,
+        "price": STAKE_AMOUNT,
+        "limit_order": {
+            "stop_loss": STOP_LOSS_AMT,
+            "take_profit": TAKE_PROFIT_AMT
+        }
+    }
+    
+    await ws.send(json.dumps(buy_req))
+    buy_resp = json.loads(await ws.recv())
+    
+    if "error" not in buy_resp:
+        trade = {
+            "id": buy_resp["buy"]["contract_id"],
+            "time": datetime.datetime.now().strftime("%H:%M:%S"),
+            "type": "Rise (CALL)" if contract_type == "CALL" else "Fall (PUT)",
+            "entry": str(entry_price),
+            "status": f"Open (SL: ${STOP_LOSS_AMT}, TP: ${TAKE_PROFIT_AMT})"
+        }
+        trade_history.insert(0, trade)
+        print(f"Trade placed: {trade}")
+
 class Toggle(BaseModel):
-    symbol: str = "R_100"
+    symbol: str = "frxXAUUSD"
 
 @app.post("/api/bot/start")
-def start(body: Toggle):
+async def start(body: Toggle):
+    global bot_task
     bot_state["running"] = True
     bot_state["symbol"] = body.symbol
+    if bot_task is None or bot_task.done():
+        bot_task = asyncio.create_task(run_strategy())
     return bot_state
 
 @app.post("/api/bot/stop")
 def stop():
+    global bot_task
     bot_state["running"] = False
+    if bot_task:
+        bot_task.cancel()
+        bot_task = None
     return bot_state
