@@ -93,57 +93,59 @@ async def open_trades():
         print(f"Error fetching open trades: {e}")
         return []
 
+# --- THE BULLETPROOF STRATEGY ENGINE ---
 async def run_strategy():
     symbol = bot_state["symbol"]
     print(f"Strategy started for {symbol}...")
     
-    try:
-        async with websockets.connect(WS_TRADING) as ws:
-            await ws.send(json.dumps({"authorize": TOKEN}))
-            await ws.recv() 
-            
-            while bot_state["running"]:
-                candle_req = {"ticks_history": symbol, "adjust_start_time": 1, "count": 50, "end": "latest", "start": 1, "style": "candles", "granularity": 60}
-                await ws.send(json.dumps(candle_req))
-                resp = json.loads(await ws.recv())
+    # This outer loop keeps the bot alive even if the connection drops
+    while bot_state["running"]:
+        try:
+            async with websockets.connect(WS_TRADING) as ws:
+                await ws.send(json.dumps({"authorize": TOKEN}))
+                await ws.recv() 
                 
-                if "candles" in resp:
-                    df = pd.DataFrame(resp["candles"])
-                    df['close'] = df['close'].astype(float)
-
-                    # Calculate EMA 9 and EMA 21 using standard Pandas
-                    df['EMA_9'] = df['close'].ewm(span=9, adjust=False).mean()
-                    df['EMA_21'] = df['close'].ewm(span=21, adjust=False).mean()
+                # Inner loop for active connection
+                while bot_state["running"]:
+                    candle_req = {"ticks_history": symbol, "adjust_start_time": 1, "count": 50, "end": "latest", "start": 1, "style": "candles", "granularity": 60}
+                    await ws.send(json.dumps(candle_req))
+                    resp = json.loads(await ws.recv())
                     
-                    # Calculate RSI 14 using standard Pandas
-                    delta = df['close'].diff()
-                    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-                    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-                    rs = gain / loss
-                    df['RSI'] = 100 - (100 / (1 + rs))
+                    if "candles" in resp:
+                        df = pd.DataFrame(resp["candles"])
+                        df['close'] = df['close'].astype(float)
+
+                        df['EMA_9'] = df['close'].ewm(span=9, adjust=False).mean()
+                        df['EMA_21'] = df['close'].ewm(span=21, adjust=False).mean()
+                        
+                        delta = df['close'].diff()
+                        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+                        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+                        rs = gain / loss
+                        df['RSI'] = 100 - (100 / (1 + rs))
+                        
+                        current = df.iloc[-1]
+                        prev = df.iloc[-2]
+                        current_price = current['close']
+
+                        long_signal = (prev['EMA_9'] <= prev['EMA_21']) and (current['EMA_9'] > current['EMA_21']) and (current['RSI'] > 50)
+                        short_signal = (prev['EMA_9'] >= prev['EMA_21']) and (current['EMA_9'] < current['EMA_21']) and (current['RSI'] < 50)
+
+                        if long_signal:
+                            print(f"LONG Signal on {symbol} at {current_price}")
+                            await place_trade(ws, "CALL", symbol, current_price)
+                            await asyncio.sleep(60) 
+                        elif short_signal:
+                            print(f"SHORT Signal on {symbol} at {current_price}")
+                            await place_trade(ws, "PUT", symbol, current_price)
+                            await asyncio.sleep(60)
                     
-                    current = df.iloc[-1]
-                    prev = df.iloc[-2]
-                    current_price = current['close']
-
-                    # Check Signals
-                    long_signal = (prev['EMA_9'] <= prev['EMA_21']) and (current['EMA_9'] > current['EMA_21']) and (current['RSI'] > 50)
-                    short_signal = (prev['EMA_9'] >= prev['EMA_21']) and (current['EMA_9'] < current['EMA_21']) and (current['RSI'] < 50)
-
-                    if long_signal:
-                        print(f"LONG Signal on {symbol} at {current_price}")
-                        await place_trade(ws, "CALL", symbol, current_price)
-                        await asyncio.sleep(60) 
-                    elif short_signal:
-                        print(f"SHORT Signal on {symbol} at {current_price}")
-                        await place_trade(ws, "PUT", symbol, current_price)
-                        await asyncio.sleep(60)
-                
-                await asyncio.sleep(10) 
-                
-    except Exception as e:
-        print(f"Strategy Error: {e}")
-        bot_state["running"] = False
+                    await asyncio.sleep(10) 
+                    
+        except Exception as e:
+            # If the connection drops, log it, wait 5 seconds, and reconnect!
+            print(f"Strategy Connection Lost: {e}. Reconnecting in 5 seconds...")
+            await asyncio.sleep(5)
 
 async def place_trade(ws, contract_type, symbol, entry_price):
     proposal_req = {
