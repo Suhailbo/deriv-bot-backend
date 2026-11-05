@@ -13,7 +13,6 @@ APP_ID = "34S0dpfCnDpl2MirCfCM5"
 TOKEN = os.environ.get("DERIV_API_TOKEN", "")
 REST_BASE = "https://api.derivws.com"
 WS_PUBLIC = "wss://api.derivws.com/trading/v1/options/ws/public"
-WS_TRADING = f"wss://ws.derivws.com/websockets/v3?app_id={APP_ID}"
 
 # --- TRADE SETTINGS ---
 STAKE_AMOUNT = 1.00      
@@ -28,6 +27,44 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 bot_state = {"running": False, "symbol": "frxXAUUSD"} 
 trade_history = []
 bot_task = None
+
+# --- HELPER: Get Demo Account ID ---
+async def get_demo_account_id():
+    headers = {"Authorization": f"Bearer {TOKEN}", "Deriv-App-ID": APP_ID}
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(f"{REST_BASE}/trading/v1/options/accounts", headers=headers)
+            accounts = response.json().get("data", [])
+            demo = next((acc for acc in accounts if acc.get("account_type") == "demo" or acc.get("type") == "demo"), None)
+            if demo:
+                return demo.get("account_id")
+            return None
+    except Exception as e:
+        print(f"Error fetching demo account ID: {e}")
+        return None
+
+# --- HELPER: Get Authenticated WebSocket URL via OTP ---
+async def get_authenticated_ws_url():
+    account_id = await get_demo_account_id()
+    if not account_id:
+        print("Could not find demo account ID for OTP.")
+        return None
+    
+    headers = {"Authorization": f"Bearer {TOKEN}", "Deriv-App-ID": APP_ID}
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            # Request the OTP URL
+            otp_response = await client.post(f"{REST_BASE}/trading/v1/options/accounts/{account_id}/otp", headers=headers)
+            if otp_response.status_code == 200:
+                data = otp_response.json()
+                if "data" in data and "ws_url" in data["data"]:
+                    return data["data"]["ws_url"]
+                elif "ws_url" in data:
+                    return data["ws_url"]
+            print(f"OTP Error: {otp_response.status_code} - {otp_response.text}")
+    except Exception as e:
+        print(f"Exception during OTP request: {e}")
+    return None
 
 @app.get("/api/health")
 def health():
@@ -68,10 +105,11 @@ async def open_trades():
     if not TOKEN:
         return []
     try:
-        async with websockets.connect(WS_TRADING) as ws:
-            await ws.send(json.dumps({"authorize": TOKEN}))
-            await ws.recv()
+        ws_url = await get_authenticated_ws_url()
+        if not ws_url:
+            return []
             
+        async with websockets.connect(ws_url) as ws:
             await ws.send(json.dumps({"portfolio": 1}))
             resp = json.loads(await ws.recv())
             
@@ -98,52 +136,56 @@ async def run_strategy():
     symbol = bot_state["symbol"]
     print(f"Strategy started for {symbol}...")
     
-    # This outer loop keeps the bot alive even if the connection drops
     while bot_state["running"]:
         try:
-            async with websockets.connect(WS_TRADING) as ws:
-                await ws.send(json.dumps({"authorize": TOKEN}))
-                await ws.recv() 
+            ws_url = await get_authenticated_ws_url()
+            if not ws_url:
+                print("Failed to get authenticated WebSocket URL. Retrying in 5s...")
+                await asyncio.sleep(5)
+                continue
                 
+            print(f"Connecting to authenticated WS: {ws_url[:50]}...")
+            async with websockets.connect(ws_url) as ws:
                 # Inner loop for active connection
                 while bot_state["running"]:
-                    candle_req = {"ticks_history": symbol, "adjust_start_time": 1, "count": 50, "end": "latest", "start": 1, "style": "candles", "granularity": 60}
-                    await ws.send(json.dumps(candle_req))
-                    resp = json.loads(await ws.recv())
-                    
-                    if "candles" in resp:
-                        df = pd.DataFrame(resp["candles"])
-                        df['close'] = df['close'].astype(float)
-
-                        df['EMA_9'] = df['close'].ewm(span=9, adjust=False).mean()
-                        df['EMA_21'] = df['close'].ewm(span=21, adjust=False).mean()
+                    # Use the public endpoint for market data, as it doesn't require auth
+                    async with websockets.connect(WS_PUBLIC) as public_ws:
+                        candle_req = {"ticks_history": symbol, "adjust_start_time": 1, "count": 50, "end": "latest", "start": 1, "style": "candles", "granularity": 60}
+                        await public_ws.send(json.dumps(candle_req))
+                        resp = json.loads(await public_ws.recv())
                         
-                        delta = df['close'].diff()
-                        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-                        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-                        rs = gain / loss
-                        df['RSI'] = 100 - (100 / (1 + rs))
-                        
-                        current = df.iloc[-1]
-                        prev = df.iloc[-2]
-                        current_price = current['close']
+                        if "candles" in resp:
+                            df = pd.DataFrame(resp["candles"])
+                            df['close'] = df['close'].astype(float)
 
-                        long_signal = (prev['EMA_9'] <= prev['EMA_21']) and (current['EMA_9'] > current['EMA_21']) and (current['RSI'] > 50)
-                        short_signal = (prev['EMA_9'] >= prev['EMA_21']) and (current['EMA_9'] < current['EMA_21']) and (current['RSI'] < 50)
+                            df['EMA_9'] = df['close'].ewm(span=9, adjust=False).mean()
+                            df['EMA_21'] = df['close'].ewm(span=21, adjust=False).mean()
+                            
+                            delta = df['close'].diff()
+                            gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+                            loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+                            rs = gain / loss
+                            df['RSI'] = 100 - (100 / (1 + rs))
+                            
+                            current = df.iloc[-1]
+                            prev = df.iloc[-2]
+                            current_price = current['close']
 
-                        if long_signal:
-                            print(f"LONG Signal on {symbol} at {current_price}")
-                            await place_trade(ws, "CALL", symbol, current_price)
-                            await asyncio.sleep(60) 
-                        elif short_signal:
-                            print(f"SHORT Signal on {symbol} at {current_price}")
-                            await place_trade(ws, "PUT", symbol, current_price)
-                            await asyncio.sleep(60)
+                            long_signal = (prev['EMA_9'] <= prev['EMA_21']) and (current['EMA_9'] > current['EMA_21']) and (current['RSI'] > 50)
+                            short_signal = (prev['EMA_9'] >= prev['EMA_21']) and (current['EMA_9'] < current['EMA_21']) and (current['RSI'] < 50)
+
+                            if long_signal:
+                                print(f"LONG Signal on {symbol} at {current_price}")
+                                await place_trade(ws, "CALL", symbol, current_price)
+                                await asyncio.sleep(60) 
+                            elif short_signal:
+                                print(f"SHORT Signal on {symbol} at {current_price}")
+                                await place_trade(ws, "PUT", symbol, current_price)
+                                await asyncio.sleep(60)
                     
                     await asyncio.sleep(10) 
                     
         except Exception as e:
-            # If the connection drops, log it, wait 5 seconds, and reconnect!
             print(f"Strategy Connection Lost: {e}. Reconnecting in 5 seconds...")
             await asyncio.sleep(5)
 
