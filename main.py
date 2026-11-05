@@ -14,12 +14,10 @@ TOKEN = os.environ.get("DERIV_API_TOKEN", "")
 REST_BASE = "https://api.derivws.com"
 WS_PUBLIC = "wss://api.derivws.com/trading/v1/options/ws/public"
 
-# --- TRADE SETTINGS ---
 STAKE_AMOUNT = 1.00      
 STOP_LOSS_AMT = 0.50     
 TAKE_PROFIT_AMT = 1.00   
 DURATION = 5             
-# ----------------------
 
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -28,7 +26,6 @@ bot_state = {"running": False, "symbol": "frxXAUUSD"}
 trade_history = []
 bot_task = None
 
-# --- HELPER: Get Demo Account ID ---
 async def get_demo_account_id():
     headers = {"Authorization": f"Bearer {TOKEN}", "Deriv-App-ID": APP_ID}
     try:
@@ -43,11 +40,9 @@ async def get_demo_account_id():
         print(f"Error fetching demo account ID: {e}")
         return None
 
-# --- HELPER: Get Authenticated WebSocket URL via OTP ---
 async def get_authenticated_ws_url():
     account_id = await get_demo_account_id()
     if not account_id:
-        print("Could not find demo account ID for OTP.")
         return None
     
     headers = {"Authorization": f"Bearer {TOKEN}", "Deriv-App-ID": APP_ID}
@@ -56,12 +51,10 @@ async def get_authenticated_ws_url():
             otp_response = await client.post(f"{REST_BASE}/trading/v1/options/accounts/{account_id}/otp", headers=headers)
             if otp_response.status_code == 200:
                 data = otp_response.json()
-                # FIXED: Deriv uses "url", not "ws_url"
                 if "data" in data and "url" in data["data"]:
                     return data["data"]["url"]
                 elif "url" in data:
                     return data["url"]
-            print(f"OTP Error: {otp_response.status_code} - {otp_response.text}")
     except Exception as e:
         print(f"Exception during OTP request: {e}")
     return None
@@ -124,14 +117,13 @@ async def open_trades():
                     "symbol": c.get("symbol"),
                     "type": "Rise" if c.get("contract_type") == "CALL" else "Fall",
                     "buy_price": c.get("buy_price"),
-                    "profit": c.get("profit", 0), # Live P&L
+                    "profit": c.get("profit", 0), 
                 })
             return open_list
     except Exception as e:
         print(f"Error fetching open trades: {e}")
         return []
 
-# --- THE BULLETPROOF STRATEGY ENGINE ---
 async def run_strategy():
     symbol = bot_state["symbol"]
     print(f"Strategy started for {symbol}...")
@@ -140,15 +132,11 @@ async def run_strategy():
         try:
             ws_url = await get_authenticated_ws_url()
             if not ws_url:
-                print("Failed to get authenticated WebSocket URL. Retrying in 5s...")
                 await asyncio.sleep(5)
                 continue
                 
-            print(f"Connecting to authenticated WS: {ws_url[:50]}...")
             async with websockets.connect(ws_url) as ws:
-                # Inner loop for active connection
                 while bot_state["running"]:
-                    # Use the public endpoint for market data, as it doesn't require auth
                     async with websockets.connect(WS_PUBLIC) as public_ws:
                         candle_req = {"ticks_history": symbol, "adjust_start_time": 1, "count": 50, "end": "latest", "start": 1, "style": "candles", "granularity": 60}
                         await public_ws.send(json.dumps(candle_req))
@@ -175,11 +163,9 @@ async def run_strategy():
                             short_signal = (prev['EMA_9'] >= prev['EMA_21']) and (current['EMA_9'] < current['EMA_21']) and (current['RSI'] < 50)
 
                             if long_signal:
-                                print(f"LONG Signal on {symbol} at {current_price}")
                                 await place_trade(ws, "CALL", symbol, current_price)
                                 await asyncio.sleep(60) 
                             elif short_signal:
-                                print(f"SHORT Signal on {symbol} at {current_price}")
                                 await place_trade(ws, "PUT", symbol, current_price)
                                 await asyncio.sleep(60)
                     
@@ -204,7 +190,6 @@ async def place_trade(ws, contract_type, symbol, entry_price):
     prop_resp = json.loads(await ws.recv())
     
     if "error" in prop_resp:
-        print(f"Proposal Error: {prop_resp['error']['message']}")
         return
 
     proposal_id = prop_resp["proposal"]["id"]
@@ -230,7 +215,6 @@ async def place_trade(ws, contract_type, symbol, entry_price):
             "status": f"Open (SL: ${STOP_LOSS_AMT}, TP: ${TAKE_PROFIT_AMT})"
         }
         trade_history.insert(0, trade)
-        print(f"Trade placed: {trade}")
 
 class Toggle(BaseModel):
     symbol: str = "frxXAUUSD"
@@ -251,4 +235,5 @@ def stop():
     if bot_task:
         bot_task.cancel()
         bot_task = None
+    return bot_statene
     return bot_stateurn bot_state
