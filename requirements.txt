@@ -4,4 +4,3 @@ httpx
 websockets
 pydantic
 pandas
-pandas_ta
