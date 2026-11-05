@@ -5,7 +5,6 @@ import asyncio
 import websockets
 import datetime
 import pandas as pd
-import pandas_ta as ta
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -17,10 +16,10 @@ WS_PUBLIC = "wss://api.derivws.com/trading/v1/options/ws/public"
 WS_TRADING = f"wss://ws.derivws.com/websockets/v3?app_id={APP_ID}"
 
 # --- TRADE SETTINGS ---
-STAKE_AMOUNT = 1.00      # How much USD to risk per trade
-STOP_LOSS_AMT = 0.50     # Close if trade drops by $0.50 (50% loss)
-TAKE_PROFIT_AMT = 1.00   # Close if trade gains $1.00 (100% profit)
-DURATION = 5             # Trade length in minutes
+STAKE_AMOUNT = 1.00      
+STOP_LOSS_AMT = 0.50     
+TAKE_PROFIT_AMT = 1.00   
+DURATION = 5             
 # ----------------------
 
 app = FastAPI()
@@ -74,7 +73,6 @@ async def run_strategy():
             await ws.recv() 
             
             while bot_state["running"]:
-                # Fetch 50 candles to calculate indicators
                 candle_req = {"ticks_history": symbol, "adjust_start_time": 1, "count": 50, "end": "latest", "start": 1, "style": "candles", "granularity": 60}
                 await ws.send(json.dumps(candle_req))
                 resp = json.loads(await ws.recv())
@@ -82,18 +80,23 @@ async def run_strategy():
                 if "candles" in resp:
                     df = pd.DataFrame(resp["candles"])
                     df['close'] = df['close'].astype(float)
-                    df['high'] = df['high'].astype(float)
-                    df['low'] = df['low'].astype(float)
-                    df['open'] = df['open'].astype(float)
 
-                    df['EMA_9'] = ta.ema(df['close'], length=9)
-                    df['EMA_21'] = ta.ema(df['close'], length=21)
-                    df['RSI'] = ta.rsi(df['close'], length=14)
+                    # Calculate EMA 9 and EMA 21 using standard Pandas
+                    df['EMA_9'] = df['close'].ewm(span=9, adjust=False).mean()
+                    df['EMA_21'] = df['close'].ewm(span=21, adjust=False).mean()
+                    
+                    # Calculate RSI 14 using standard Pandas
+                    delta = df['close'].diff()
+                    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+                    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+                    rs = gain / loss
+                    df['RSI'] = 100 - (100 / (1 + rs))
                     
                     current = df.iloc[-1]
                     prev = df.iloc[-2]
                     current_price = current['close']
 
+                    # Check Signals
                     long_signal = (prev['EMA_9'] <= prev['EMA_21']) and (current['EMA_9'] > current['EMA_21']) and (current['RSI'] > 50)
                     short_signal = (prev['EMA_9'] >= prev['EMA_21']) and (current['EMA_9'] < current['EMA_21']) and (current['RSI'] < 50)
 
@@ -113,7 +116,6 @@ async def run_strategy():
         bot_state["running"] = False
 
 async def place_trade(ws, contract_type, symbol, entry_price):
-    # Step 1: Request a Proposal (Deriv requires this to set SL/TP)
     proposal_req = {
         "proposal": 1,
         "amount": STAKE_AMOUNT,
@@ -133,7 +135,6 @@ async def place_trade(ws, contract_type, symbol, entry_price):
 
     proposal_id = prop_resp["proposal"]["id"]
 
-    # Step 2: Buy the contract with Stop Loss and Take Profit
     buy_req = {
         "buy": proposal_id,
         "price": STAKE_AMOUNT,
