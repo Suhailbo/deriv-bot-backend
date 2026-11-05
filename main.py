@@ -53,14 +53,14 @@ async def get_authenticated_ws_url():
     headers = {"Authorization": f"Bearer {TOKEN}", "Deriv-App-ID": APP_ID}
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            # Request the OTP URL
             otp_response = await client.post(f"{REST_BASE}/trading/v1/options/accounts/{account_id}/otp", headers=headers)
             if otp_response.status_code == 200:
                 data = otp_response.json()
-                if "data" in data and "ws_url" in data["data"]:
-                    return data["data"]["ws_url"]
-                elif "ws_url" in data:
-                    return data["ws_url"]
+                # FIXED: Deriv uses "url", not "ws_url"
+                if "data" in data and "url" in data["data"]:
+                    return data["data"]["url"]
+                elif "url" in data:
+                    return data["url"]
             print(f"OTP Error: {otp_response.status_code} - {otp_response.text}")
     except Exception as e:
         print(f"Exception during OTP request: {e}")
@@ -251,4 +251,4 @@ def stop():
     if bot_task:
         bot_task.cancel()
         bot_task = None
-    return bot_state
+    return bot_stateurn bot_state
