@@ -63,6 +63,36 @@ async def ticks(symbol: str = "frxXAUUSD"):
 def get_trades():
     return trade_history
 
+@app.get("/api/open_trades")
+async def open_trades():
+    if not TOKEN:
+        return []
+    try:
+        async with websockets.connect(WS_TRADING) as ws:
+            await ws.send(json.dumps({"authorize": TOKEN}))
+            await ws.recv()
+            
+            await ws.send(json.dumps({"portfolio": 1}))
+            resp = json.loads(await ws.recv())
+            
+            if "error" in resp:
+                return []
+                
+            contracts = resp.get("portfolio", {}).get("contracts", [])
+            open_list = []
+            for c in contracts:
+                open_list.append({
+                    "id": c.get("contract_id"),
+                    "symbol": c.get("symbol"),
+                    "type": "Rise" if c.get("contract_type") == "CALL" else "Fall",
+                    "buy_price": c.get("buy_price"),
+                    "profit": c.get("profit", 0), # Live P&L
+                })
+            return open_list
+    except Exception as e:
+        print(f"Error fetching open trades: {e}")
+        return []
+
 async def run_strategy():
     symbol = bot_state["symbol"]
     print(f"Strategy started for {symbol}...")
